@@ -2,7 +2,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { retrieveRelevantChunks } from "@/utils/documentRetrieval";
 import { createAzure } from "@ai-sdk/azure";
-import { smoothStream, streamText } from "ai";
+import { smoothStream, streamText, createDataStreamResponse } from "ai";
 import { NextResponse, type NextRequest } from "next/server";
 
 // Configuration values from your Azure OpenAI resource
@@ -83,27 +83,32 @@ export async function POST(req: NextRequest) {
     
     Please try rephrasing your question or selecting different documents.`;
     
-    // Stream the response
-    const result = streamText({
-      model: azure(config.deployment),
-      system: systemMessage,
-      messages: [
-        ...messages.map((message: ChatMessage) => ({ 
-          role: message.role, 
-          content: message.content
-        }))
-      ],
-      experimental_transform: smoothStream(),
-      maxTokens: 1000,
-      temperature: 0.7,
-      onError: ({ error }) => {
-        console.error("Streaming error:", error);
+    // Stream the response using createDataStreamResponse
+    return createDataStreamResponse({
+      execute: dataStream => {
+        const result = streamText({
+          model: azure(config.deployment),
+          system: systemMessage,
+          messages: [
+            ...messages.map((message: ChatMessage) => ({ 
+              role: message.role, 
+              content: message.content
+            }))
+          ],
+          experimental_transform: smoothStream(),
+          maxTokens: 1000,
+          temperature: 0.7,
+          onError: ({ error }) => {
+            console.error("Streaming error:", error);
+          }
+        });
+        
+        result.mergeIntoDataStream(dataStream);
+      },
+      onError: error => {
+        return error instanceof Error ? error.message : String(error);
       }
     });
-    
-    console.log("Streaming response with no relevant chunks");
-    return result.toDataStreamResponse()
-
   }
 
   // Build context from relevant chunks
@@ -120,28 +125,49 @@ Context:
 ${context}
 `;
 
-    // Stream the response
-    const result = streamText({
-      model: azure(config.deployment),
-      system: systemMessage,
-      messages: [
-        ...messages.map((message: ChatMessage) => ({ 
-          role: message.role, 
-          content: message.content
-        }))
-      ],
-      experimental_transform: smoothStream(),
-      maxTokens: 1000,
-      temperature: 0.7,
-      onError: ({ error }) => {
-        console.error("Streaming error:", error);
+    // Stream the response using createDataStreamResponse
+    return createDataStreamResponse({
+      execute: dataStream => {
+        // Create a mapping of chunk indexes to their content for later reference
+        const chunkSources = relevantChunks.map((chunk: { content: string, metadata?: unknown, document_id?: string }, index: number) => ({
+          id: `chunk-${index + 1}`,
+          content: chunk.content,
+          metadata: chunk.metadata || {},
+          documentId: chunk.document_id || '',
+          chunkIndex: index + 1
+        }));
+        
+        // Stream the text response
+        const result = streamText({
+          model: azure(config.deployment),
+          system: systemMessage,
+          messages: [
+            ...messages.map((message: ChatMessage) => ({ 
+              role: message.role, 
+              content: message.content
+            }))
+          ],
+          experimental_transform: smoothStream(),
+          maxTokens: 1000,
+          temperature: 0.7,
+          onFinish: () => {
+            // When the response is complete, add the sources as message annotations
+            // Based on the example message structure
+            dataStream.writeMessageAnnotation({
+              sources: chunkSources
+            });
+          },
+          onError: ({ error }) => {
+            console.error("Streaming error:", error);
+          }
+        });
+        
+        result.mergeIntoDataStream(dataStream);
+      },
+      onError: error => {
+        return error instanceof Error ? error.message : String(error);
       }
     });
-
-    console.log("Streaming response with context");
-    
-    // Return a streaming response
-    return result.toDataStreamResponse();
   } catch (error: unknown) {
     console.error("API error:", error);
     const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";

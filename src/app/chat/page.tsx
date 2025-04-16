@@ -2,6 +2,7 @@
 'use client'
 
 import { useChat } from "@ai-sdk/react";
+import type { Message } from "@ai-sdk/react";
 import { useState, useEffect, useCallback } from "react";
 import { createClient } from "@/lib/supabase/client";
 import Link from "next/link";
@@ -17,13 +18,22 @@ interface Document {
   created_at: string;
 }
 
+interface ChunkSource {
+  id: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  documentId: string;
+  chunkIndex: number;
+}
+
 export default function ChatPage() {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [selectedDocuments, setSelectedDocuments] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [activeChunk, setActiveChunk] = useState<ChunkSource | null>(null);
   const { userId } = useAuth();
   
-  const { messages, input, handleInputChange, handleSubmit, status } = useChat({
+  const { messages, input, handleInputChange, handleSubmit, status, } = useChat({
     api: "/api/chat",
     body: {
       userId: userId, // Get this from auth
@@ -34,8 +44,11 @@ export default function ChatPage() {
     },
     onFinish: (message) => {
       console.log("Chat response finished", message);
+      console.log("Message with annotations:", message);
     },
   });
+
+  console.log("Messages with annotations:", messages);
 
   const supabase = createClient();
   
@@ -71,6 +84,38 @@ export default function ChatPage() {
   };
   
   const isChatLoading = status === 'streaming' || status === 'submitted';
+
+  // Function to handle mouse enter on chunk reference
+  const handleChunkHover = (chunk: ChunkSource) => {
+    setActiveChunk(chunk);
+  };
+
+  // Function to handle mouse leave on chunk reference
+  const handleChunkLeave = () => {
+    setActiveChunk(null);
+  };
+
+  // Function to find sources in message annotations
+  const findSourcesInAnnotations = (message: Message): ChunkSource[] | null => {
+    if (!message.annotations || !Array.isArray(message.annotations)) {
+      return null;
+    }
+
+    // Find the annotation that contains sources
+    for (const annotation of message.annotations) {
+      if (annotation && typeof annotation === 'object' && 'sources' in annotation) {
+        // Use a more specific type for the annotation
+        const typedAnnotation = annotation as Record<string, unknown>;
+        const sources = typedAnnotation.sources;
+        
+        if (Array.isArray(sources)) {
+          return sources as ChunkSource[];
+        }
+      }
+    }
+
+    return null;
+  };
   
   return (
     <div className="flex flex-col h-screen">
@@ -152,22 +197,57 @@ export default function ChatPage() {
               </div>
             ) : (
               <div className="space-y-4">
-                {messages.map((message) => (
-                  <div 
-                    key={message.id} 
-                    className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
-                  >
+                {messages.map((message) => {
+                  // Find sources in the message annotations
+                  const sources = message.role === 'assistant' 
+                    ? findSourcesInAnnotations(message)
+                    : null;
+                    
+                  return (
                     <div 
-                      className={`max-w-3xl p-3 rounded-lg ${
-                        message.role === "user" 
-                          ? "bg-blue-500 text-white" 
-                          : "bg-gray-200 text-gray-800"
-                      }`}
+                      key={message.id} 
+                      className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
                     >
-                      {message.content}
+                      <div 
+                        className={`max-w-3xl p-3 rounded-lg ${
+                          message.role === "user" 
+                            ? "bg-blue-500 text-white" 
+                            : "bg-gray-200 text-gray-800"
+                        }`}
+                      >
+                        <div>{message.content}</div>
+                        
+                        {/* Display chunk references if available */}
+                        {sources && sources.length > 0 && (
+                          <div className="mt-3 pt-2 border-t border-gray-300">
+                            <p className="text-xs text-gray-600 mb-1">Sources:</p>
+                            <div className="flex flex-wrap gap-1">
+                              {sources.map((source) => (
+                                <span 
+                                  key={source.id}
+                                  className="inline-flex items-center px-2 py-1 rounded text-xs bg-gray-300 text-gray-700 cursor-pointer relative"
+                                  onMouseEnter={() => handleChunkHover(source)}
+                                  onMouseLeave={handleChunkLeave}
+                                >
+                                  [{source.chunkIndex}]
+                                  
+                                  {/* Hover tooltip */}
+                                  {activeChunk?.id === source.id && (
+                                    <div className="absolute bottom-full left-0 mb-2 p-2 bg-white rounded shadow-lg border border-gray-200 w-64 z-10 text-xs">
+                                      <div className="max-h-32 overflow-y-auto">
+                                        {activeChunk.content}
+                                      </div>
+                                    </div>
+                                  )}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
                 {isChatLoading && (
                   <div className="flex justify-start">
                     <div className="bg-gray-200 text-gray-800 max-w-3xl p-3 rounded-lg">
